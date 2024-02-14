@@ -38,4 +38,6 @@ def geocode_address(input_csv, output_csv):
     gdf.to_file('output.shp')
 
 # Usage example
-geocode_address('input.csv', 'output.csv')
+input_file = input("Enter the input CSV file name: ")
+output_file = input("Enter the output CSV file name: ")
+geocode_address(input_file, output_file)
