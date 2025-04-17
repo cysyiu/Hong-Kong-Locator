@@ -1,91 +1,107 @@
 import tkinter as tk
-from tkinter import filedialog
-from tkinter import messagebox
-from functools import partial
-from geopandas import points_from_xy
-import requests
+from tkinter import filedialog, messagebox
 import pandas as pd
 import geopandas as gpd
+import requests
+import os
+from pyproj import Transformer
 
 
-def geocode_address(input_csv, output_csv):
-    # Read the input CSV file
-    df = pd.read_csv(input_csv)
-    # column_names = df.columns.tolist()
-    # Create a new DataFrame to store the geocoded results
-    geocoded_data = pd.DataFrame([])
+def geocode_address(input_csv, address_column, output_shp, geocoded_csv, coord_system):
+    df = pd.read_csv(input_csv, encoding="utf-8")  # Ensure support for Chinese characters
+    geocoded_data = df.copy()  # Preserve original data
 
+    transformer = None
+    if coord_system == "WGS 1984":
+        transformer = Transformer.from_crs("EPSG:2326", "EPSG:4326", always_xy=True)  # Convert HK1980 to WGS84
 
-    # Iterate over each address in the input CSV
-    for address in df['Address']:
-        #Create the API request URL
+    lat_list, lon_list = [], []
+
+    for address in df[address_column]:
         base_url = 'https://geodata.gov.hk/gs/api/v1.0.0/locationSearch'
-        params = {'q': address}
-        response = requests.get(base_url, params=params)
-        
-        if response.status_code == 200:
-            # Extract the X and Y values from the first search result
-            data = response.json()
-            first_result = pd.DataFrame(data).iloc[0]
-            x = first_result['x']
-            y = first_result['y']
-            geocoded_data = pd.concat([geocoded_data, pd.DataFrame({'Address': [address], 'X': [x], 'Y': [y]})], ignore_index=True)
+        response = requests.get(base_url, params={'q': address})
+
+        if response.status_code == 200 and response.json():
+            data = response.json()[0]
+            x, y = data['x'], data['y']
+
+            if transformer:
+                lon, lat = transformer.transform(x, y)
+            else:
+                lon, lat = x, y  # Keep HK1980
+
         else:
-                # If no results found, set X and Y as None
-            geocoded_data = pd.concat([geocoded_data, pd.DataFrame({'Address': [address], 'X': [None], 'Y': [None]})], ignore_index=True)
+            lon, lat = None, None
 
-    # Write the geocoded data to the output CSV file
-    geocoded_data.to_csv(output_csv, index=False)
+        lon_list.append(lon)
+        lat_list.append(lat)
 
-    #Create a GeoDataFrame from the geocoded data
-    geometry = gpd.points_from_xy(geocoded_data['X'], geocoded_data['Y'])
-    gdf = gpd.GeoDataFrame(geocoded_data, geometry=geometry, crs='EPSG:2326')
+    geocoded_data["Longitude"] = lon_list
+    geocoded_data["Latitude"] = lat_list
+    geocoded_data.to_csv(geocoded_csv, encoding="utf-8", index=False)
 
-    #Save the GeoDataFrame as a shapefile
-    gdf.to_file('output.shp')
+    gdf = gpd.GeoDataFrame(
+        geocoded_data, geometry=gpd.points_from_xy(geocoded_data["Longitude"], geocoded_data["Latitude"]),
+        crs="EPSG:2326" if coord_system == "Hong Kong 1980" else "EPSG:4326"
+    )
+    gdf.to_file(output_shp)
 
 
-# Import the geocode_address function from the previous code snippet
 def browse_file():
     filepath = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
     entry_file_path.delete(0, tk.END)
     entry_file_path.insert(tk.END, filepath)
 
+    try:
+        df = pd.read_csv(filepath, encoding="utf-8")
+        column_options = df.columns.tolist()
+        selected_column.set(column_options[0])
+
+        dropdown["menu"].delete(0, "end")
+        for option in column_options:
+            dropdown["menu"].add_command(label=option, command=tk._setit(selected_column, option))
+
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to read CSV file:\n{str(e)}")
+
 
 def geocode():
     csv_file = entry_file_path.get()
-    address_column = entry_address_column.get()
-    
+    address_column = selected_column.get()
+    coord_system = selected_system.get()
+
     if csv_file and address_column:
+        filename, _ = os.path.splitext(os.path.basename(csv_file))
+        output_shp = f"{filename}.shp"
+        geocoded_csv = f"{filename}_geocoded.csv"
+
         try:
-            gdf = geocode_address(csv_file, address_column)
-            messagebox.showinfo("Geocoding Complete", "Geocoding completed successfully. Shapefile saved as 'geocoded_data.shp'.")
+            geocode_address(csv_file, address_column, output_shp, geocoded_csv, coord_system)
+            messagebox.showinfo("Geocoding Complete", f"Shapefile saved as '{output_shp}'. Geocoded CSV saved as '{geocoded_csv}'.")
         except Exception as e:
-            messagebox.showerror("Geocoding Error", f"An error occurred during geocoding:\n{str(e)}")
+            messagebox.showerror("Geocoding Error", f"Error: {str(e)}")
     else:
-        messagebox.showerror("Input Error", "Please select a CSV file and enter the address column name.")
+        messagebox.showerror("Input Error", "Please select a CSV file, an address column, and a coordinate system.")
 
 
-# Create the main application window
 window = tk.Tk()
-window.title("Address Geocoding Application")
+window.title("Geocoding Application")
 
-
-# Create and place the widgets
-label_file_path = tk.Label(window, text="CSV File Path:")
-label_file_path.grid(row=0, column=0, padx=10, pady=5, sticky="e")
+tk.Label(window, text="CSV File Path:").grid(row=0, column=0, padx=10, pady=5, sticky="e")
 entry_file_path = tk.Entry(window, width=50)
 entry_file_path.grid(row=0, column=1, padx=10, pady=5)
-button_browse = tk.Button(window, text="Browse", command=browse_file)
-button_browse.grid(row=0, column=2, padx=5, pady=5)
+tk.Button(window, text="Browse", command=browse_file).grid(row=0, column=2, padx=5, pady=5)
 
-label_address_column = tk.Label(window, text="Address Column:")
-label_address_column.grid(row=1, column=0, padx=10, pady=5, sticky="e")
-entry_address_column = tk.Entry(window, width=30)
-entry_address_column.grid(row=1, column=1, padx=10, pady=5)
+tk.Label(window, text="Address Column:").grid(row=1, column=0, padx=10, pady=5, sticky="e")
+selected_column = tk.StringVar()
+dropdown = tk.OptionMenu(window, selected_column, "")
+dropdown.grid(row=1, column=1, padx=10, pady=5)
 
-button_geocode = tk.Button(window, text="Geocode", command=geocode)
-button_geocode.grid(row=2, column=0, columnspan=3, padx=10, pady=10)
+tk.Label(window, text="Coordinate System:").grid(row=2, column=0, padx=10, pady=5, sticky="e")
+selected_system = tk.StringVar(value="Hong Kong 1980")
+coord_dropdown = tk.OptionMenu(window, selected_system, "Hong Kong 1980", "WGS 1984")
+coord_dropdown.grid(row=2, column=1, padx=10, pady=5)
 
-# Start the application
+tk.Button(window, text="Geocode", command=geocode).grid(row=3, column=0, columnspan=3, padx=10, pady=10)
+
 window.mainloop()
